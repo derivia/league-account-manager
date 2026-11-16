@@ -1,0 +1,42 @@
+appId: com.leagueaccountmanager.app
+productName: League Account Manager
+copyright: Copyright (c) 2026
+
+directories:
+  output: dist-electron
+
+files:
+  - desktop/main.js
+  - desktop/preload.js
+  - desktop/updater.js
+  - desktop/index.html
+  - desktop/renderer.js
+  - desktop/style.css
+  - desktop/icon.ico
+
+extraMetadata:
+  main: desktop/main.js
+
+electronVersion: "36.9.5"
+
+asar: true
+
+win:
+  target: nsis
+  icon: desktop/icon.ico
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  installerIcon: desktop/icon.ico
+  uninstallerIcon: desktop/icon.ico
+  installerHeaderIcon: desktop/icon.ico
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: League Account Manager
+  runAfterFinish: true
+
+publish:
+  provider: github
+  owner: derivia
+  repo: league-account-manager

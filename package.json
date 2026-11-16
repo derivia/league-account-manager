@@ -1,0 +1,16 @@
+{
+  "name": "league-account-manager",
+  "version": "0.1.0",
+  "private": true,
+  "main": "desktop/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --config electron-builder.yml",
+    "release": "electron-builder --config electron-builder.yml --publish always"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^36.4.0",
+    "electron-builder": "^26.0.12"
+  }
+}
