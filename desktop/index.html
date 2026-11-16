@@ -37,6 +37,11 @@
         Log into an account in the Riot Client with "Stay signed in" checked, then save it here.
         Switching never re-prompts for 2FA as long as that session stays saved.
       </p>
+      <div id="save-profile-form" class="row" style="display:none; margin-bottom: 10px">
+        <input type="text" id="save-profile-name" placeholder="Account name" style="flex:1" />
+        <button class="btn small" id="save-profile-confirm">Save</button>
+        <button class="btn ghost small" id="save-profile-cancel">Cancel</button>
+      </div>
       <div id="profile-list" class="profile-list"></div>
       <div id="profile-empty" class="empty">No saved accounts yet.</div>
     </div>

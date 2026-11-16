@@ -54,15 +54,35 @@ async function refreshProfiles() {
   }
 }
 
-document.getElementById("save-profile").addEventListener("click", async () => {
-  const name = prompt("Name this account:");
-  if (!name || !name.trim()) return;
-  const result = await window.lam.saveProfile(name.trim());
+const saveForm = document.getElementById("save-profile-form");
+const saveNameInput = document.getElementById("save-profile-name");
+
+document.getElementById("save-profile").addEventListener("click", () => {
+  saveForm.style.display = "flex";
+  saveNameInput.value = "";
+  saveNameInput.focus();
+});
+
+document.getElementById("save-profile-cancel").addEventListener("click", () => {
+  saveForm.style.display = "none";
+});
+
+async function confirmSaveProfile() {
+  const name = saveNameInput.value.trim();
+  if (!name) return;
+  const result = await window.lam.saveProfile(name);
   if (!result.ok) {
     alert(result.error || "Failed to save account.");
     return;
   }
+  saveForm.style.display = "none";
   refreshProfiles();
+}
+
+document.getElementById("save-profile-confirm").addEventListener("click", confirmSaveProfile);
+saveNameInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") confirmSaveProfile();
+  if (e.key === "Escape") { saveForm.style.display = "none"; }
 });
 
 // ── Updates ─────────────────────────────────────────────────────────
