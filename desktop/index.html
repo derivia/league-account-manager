@@ -25,6 +25,7 @@
     <div class="card">
       <h2>Riot Client</h2>
       <p class="hint" id="riot-path-hint">Not set.</p>
+      <div id="riot-banner"></div>
       <button class="btn ghost" id="pick-riot-path">Locate RiotClientServices.exe</button>
     </div>
 
@@ -42,6 +43,8 @@
         <button class="btn small" id="save-profile-confirm">Save</button>
         <button class="btn ghost small" id="save-profile-cancel">Cancel</button>
       </div>
+      <div id="save-overwrite-warning" class="banner bad" style="display:none"></div>
+      <div id="switch-banner"></div>
       <div id="profile-list" class="profile-list"></div>
       <div id="profile-empty" class="empty">No saved accounts yet.</div>
     </div>

@@ -7,69 +7,174 @@ function escapeHtml(s) {
   }[c]));
 }
 
+function banner(el, kind, message) {
+  if (!message) { el.innerHTML = ""; return; }
+  el.innerHTML = `<div class="banner ${kind}">${escapeHtml(message)}</div>`;
+}
+
+function relativeTime(ms) {
+  const diff = Date.now() - ms;
+  const mins = Math.round(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return `${days}d ago`;
+}
+
+function avatarColor(name) {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+  return `hsl(${hash % 360}, 55%, 55%)`;
+}
+
 // ── Riot Client path ────────────────────────────────────────────────
 async function refreshRiotPath() {
-  const p = await window.lam.getRiotPath();
+  const { path: p, autoDetected } = await window.lam.getRiotPath();
   const hint = document.getElementById("riot-path-hint");
-  hint.textContent = p ? p : "Not set.";
+  hint.textContent = p ? `${p}${autoDetected ? " (auto-detected)" : ""}` : "Not set.";
 }
 
 document.getElementById("pick-riot-path").addEventListener("click", async () => {
-  const picked = await window.lam.pickRiotPath();
-  if (picked) refreshRiotPath();
+  const { path: picked, warning } = await window.lam.pickRiotPath();
+  const riotBanner = document.getElementById("riot-banner");
+  if (picked) {
+    refreshRiotPath();
+    banner(riotBanner, "bad", warning);
+  }
 });
 
 // ── Accounts ────────────────────────────────────────────────────────
+let switching = false;
+
+function setListLocked(locked) {
+  switching = locked;
+  document.querySelectorAll(".switch-btn, .delete-btn, .rename-btn").forEach((b) => {
+    b.disabled = locked;
+  });
+}
+
 async function refreshProfiles() {
-  const names = await window.lam.listProfiles();
+  const profiles = await window.lam.listProfiles();
   const list = document.getElementById("profile-list");
   const empty = document.getElementById("profile-empty");
   list.innerHTML = "";
-  empty.style.display = names.length === 0 ? "block" : "none";
+  empty.style.display = profiles.length === 0 ? "block" : "none";
 
-  for (const name of names) {
+  for (const { name, savedAt, active } of profiles) {
     const row = document.createElement("div");
-    row.className = "profile-row";
+    row.className = `profile-row${active ? " active" : ""}`;
     row.innerHTML = `
-      <span class="profile-name">${escapeHtml(name)}</span>
+      <span class="profile-main">
+        <span class="profile-avatar" style="background:${avatarColor(name)}">${escapeHtml(name[0]?.toUpperCase() || "?")}</span>
+        <span class="profile-info">
+          <span class="profile-name">${escapeHtml(name)}${active ? '<span class="pill ok">active</span>' : ""}</span>
+          <span class="profile-meta">Saved ${relativeTime(savedAt)}</span>
+        </span>
+      </span>
       <span class="profile-actions">
-        <button class="btn small switch-btn">Switch</button>
+        <button class="btn ghost small rename-btn">Rename</button>
+        <button class="btn small switch-btn" ${active ? "disabled" : ""}>Switch</button>
         <button class="btn small danger delete-btn">Delete</button>
       </span>
     `;
+
     row.querySelector(".switch-btn").addEventListener("click", async () => {
-      row.querySelector(".switch-btn").disabled = true;
-      row.querySelector(".switch-btn").textContent = "Switching...";
+      if (switching) return;
+      setListLocked(true);
+      const switchBanner = document.getElementById("switch-banner");
       const result = await window.lam.switchProfile(name);
-      if (!result.ok) alert(result.error || "Failed to switch account.");
-      row.querySelector(".switch-btn").disabled = false;
-      row.querySelector(".switch-btn").textContent = "Switch";
+      setListLocked(false);
+      if (!result.ok) {
+        banner(switchBanner, "bad", result.error || "Failed to switch account.");
+      } else {
+        banner(switchBanner, "ok", `Switched to ${name}. Riot Client is launching.`);
+        refreshProfiles();
+      }
     });
-    row.querySelector(".delete-btn").addEventListener("click", async () => {
-      if (!confirm(`Delete saved account "${name}"?`)) return;
-      await window.lam.deleteProfile(name);
-      refreshProfiles();
+
+    row.querySelector(".delete-btn").addEventListener("click", () => {
+      const actions = row.querySelector(".profile-actions");
+      actions.innerHTML = `
+        <span class="hint" style="margin:0 6px 0 0">Delete "${escapeHtml(name)}"?</span>
+        <button class="btn small danger confirm-delete-btn">Delete</button>
+        <button class="btn ghost small cancel-delete-btn">Cancel</button>
+      `;
+      actions.querySelector(".confirm-delete-btn").addEventListener("click", async () => {
+        await window.lam.deleteProfile(name);
+        refreshProfiles();
+      });
+      actions.querySelector(".cancel-delete-btn").addEventListener("click", refreshProfiles);
     });
+
+    row.querySelector(".rename-btn").addEventListener("click", () => {
+      const info = row.querySelector(".profile-info");
+      info.innerHTML = `
+        <input type="text" class="rename-input" value="${escapeHtml(name)}" style="width:140px" />
+      `;
+      const actions = row.querySelector(".profile-actions");
+      actions.innerHTML = `
+        <button class="btn small confirm-rename-btn">Save</button>
+        <button class="btn ghost small cancel-rename-btn">Cancel</button>
+      `;
+      const input = info.querySelector(".rename-input");
+      input.focus();
+      input.select();
+      const doRename = async () => {
+        const result = await window.lam.renameProfile(name, input.value);
+        if (!result.ok) {
+          alert(result.error || "Failed to rename account.");
+          return;
+        }
+        refreshProfiles();
+      };
+      actions.querySelector(".confirm-rename-btn").addEventListener("click", doRename);
+      actions.querySelector(".cancel-rename-btn").addEventListener("click", refreshProfiles);
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") doRename();
+        if (e.key === "Escape") refreshProfiles();
+      });
+    });
+
     list.appendChild(row);
   }
 }
 
+window.lam.onSwitchProgress((stage) => {
+  const labels = { closing: "Closing Riot Client...", copying: "Swapping session...", launching: "Launching Riot Client..." };
+  banner(document.getElementById("switch-banner"), "", labels[stage] || stage);
+});
+
 const saveForm = document.getElementById("save-profile-form");
 const saveNameInput = document.getElementById("save-profile-name");
+const overwriteWarning = document.getElementById("save-overwrite-warning");
 
 document.getElementById("save-profile").addEventListener("click", () => {
   saveForm.style.display = "flex";
+  overwriteWarning.style.display = "none";
   saveNameInput.value = "";
   saveNameInput.focus();
 });
 
 document.getElementById("save-profile-cancel").addEventListener("click", () => {
   saveForm.style.display = "none";
+  overwriteWarning.style.display = "none";
 });
 
 async function confirmSaveProfile() {
   const name = saveNameInput.value.trim();
   if (!name) return;
+
+  if (overwriteWarning.dataset.confirmedFor !== name && await window.lam.profileExists(name)) {
+    overwriteWarning.textContent = `"${name}" already exists. Saving will overwrite it and the old session can't be recovered without logging in again. Click Save again to confirm.`;
+    overwriteWarning.style.display = "block";
+    overwriteWarning.dataset.confirmedFor = name;
+    return;
+  }
+
+  overwriteWarning.style.display = "none";
+  overwriteWarning.dataset.confirmedFor = "";
   const result = await window.lam.saveProfile(name);
   if (!result.ok) {
     alert(result.error || "Failed to save account.");
@@ -82,7 +187,10 @@ async function confirmSaveProfile() {
 document.getElementById("save-profile-confirm").addEventListener("click", confirmSaveProfile);
 saveNameInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") confirmSaveProfile();
-  if (e.key === "Escape") { saveForm.style.display = "none"; }
+  if (e.key === "Escape") { saveForm.style.display = "none"; overwriteWarning.style.display = "none"; }
+});
+saveNameInput.addEventListener("input", () => {
+  overwriteWarning.dataset.confirmedFor = "";
 });
 
 // ── Updates ─────────────────────────────────────────────────────────

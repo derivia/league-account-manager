@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const { execFile, spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 const { setupUpdater } = require("./updater.js");
 
 const SESSION_FILENAME = "RiotGamesPrivateSettings.yaml";
@@ -10,6 +11,11 @@ const RIOT_PROCESSES = [
   "RiotClientUx.exe",
   "LeagueClientUx.exe",
   "LeagueClient.exe",
+];
+const COMMON_RIOT_PATHS = [
+  "C:\\Riot Games\\Riot Client\\RiotClientServices.exe",
+  `${process.env["ProgramFiles"] || "C:\\Program Files"}\\Riot Games\\Riot Client\\RiotClientServices.exe`,
+  `${process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)"}\\Riot Games\\Riot Client\\RiotClientServices.exe`,
 ];
 
 function riotDataDir() {
@@ -41,6 +47,10 @@ function writeConfig(cfg) {
   fs.writeFileSync(configFile(), JSON.stringify(cfg), "utf8");
 }
 
+function detectRiotClientPath() {
+  return COMMON_RIOT_PATHS.find((p) => fs.existsSync(p)) || "";
+}
+
 function killRiotProcesses() {
   return Promise.all(
     RIOT_PROCESSES.map(
@@ -54,6 +64,28 @@ function killRiotProcesses() {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function fileHash(filePath) {
+  try {
+    return crypto.createHash("sha1").update(fs.readFileSync(filePath)).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+// Copies src -> dest, retrying while the destination is locked by a Riot
+// process that hasn't released its file handle yet after being killed.
+async function copyWithRetry(src, dest, attempts = 8, delayMs = 400) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      fs.copyFileSync(src, dest);
+      return;
+    } catch (err) {
+      if (i === attempts - 1) throw err;
+      await sleep(delayMs);
+    }
+  }
 }
 
 const BOUNDS_FILE = () => path.join(app.getPath("userData"), "window-bounds.json");
@@ -72,15 +104,17 @@ function saveBounds(win) {
   } catch {}
 }
 
+let mainWindow = null;
+
 function createWindow() {
   const saved = loadBounds();
   const win = new BrowserWindow({
     width: saved?.width || 420,
-    height: saved?.height || 560,
+    height: saved?.height || 620,
     x: saved?.x,
     y: saved?.y,
     minWidth: 360,
-    minHeight: 420,
+    minHeight: 460,
     title: "League Account Manager",
     frame: false,
     show: false,
@@ -104,10 +138,26 @@ function createWindow() {
   ipcMain.on("win-close", () => win.close());
 
   setupUpdater(win);
+  mainWindow = win;
   return win;
 }
 
-ipcMain.handle("get-riot-path", () => readConfig().riotClientPath || "");
+function sendProgress(stage) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("switch-progress", stage);
+  }
+}
+
+ipcMain.handle("get-riot-path", () => {
+  const cfg = readConfig();
+  if (cfg.riotClientPath) return { path: cfg.riotClientPath, autoDetected: false };
+  const detected = detectRiotClientPath();
+  if (detected) {
+    writeConfig({ ...cfg, riotClientPath: detected });
+    return { path: detected, autoDetected: true };
+  }
+  return { path: "", autoDetected: false };
+});
 
 ipcMain.handle("pick-riot-path", async () => {
   const result = await dialog.showOpenDialog({
@@ -115,23 +165,37 @@ ipcMain.handle("pick-riot-path", async () => {
     properties: ["openFile"],
     filters: [{ name: "Riot Client", extensions: ["exe"] }],
   });
-  if (result.canceled || !result.filePaths[0]) return "";
+  if (result.canceled || !result.filePaths[0]) return { path: "", warning: "" };
   const picked = result.filePaths[0];
   writeConfig({ ...readConfig(), riotClientPath: picked });
-  return picked;
+  const warning = path.basename(picked).toLowerCase() === "riotclientservices.exe"
+    ? ""
+    : `"${path.basename(picked)}" doesn't look like RiotClientServices.exe - switching may not work.`;
+  return { path: picked, warning };
 });
 
 ipcMain.handle("list-profiles", () => {
+  const liveHash = fileHash(liveSessionFile());
   try {
     return fs
       .readdirSync(profilesDir(), { withFileTypes: true })
       .filter((e) => e.isDirectory() && fs.existsSync(path.join(profilesDir(), e.name, SESSION_FILENAME)))
-      .map((e) => e.name)
-      .sort();
+      .map((e) => {
+        const sessionPath = path.join(profilesDir(), e.name, SESSION_FILENAME);
+        const stat = fs.statSync(sessionPath);
+        return {
+          name: e.name,
+          savedAt: stat.mtimeMs,
+          active: liveHash !== null && liveHash === fileHash(sessionPath),
+        };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
   } catch {
     return [];
   }
 });
+
+ipcMain.handle("profile-exists", (_e, name) => fs.existsSync(path.join(profilesDir(), name.trim())));
 
 ipcMain.handle("save-profile", (_e, name) => {
   if (!name || !name.trim()) return { ok: false, error: "Name is required." };
@@ -146,6 +210,21 @@ ipcMain.handle("save-profile", (_e, name) => {
   fs.mkdirSync(dest, { recursive: true });
   fs.copyFileSync(src, path.join(dest, SESSION_FILENAME));
   return { ok: true };
+});
+
+ipcMain.handle("rename-profile", (_e, oldName, newName) => {
+  const trimmed = (newName || "").trim();
+  if (!trimmed) return { ok: false, error: "Name is required." };
+  if (trimmed === oldName) return { ok: true };
+  const from = path.join(profilesDir(), oldName);
+  const to = path.join(profilesDir(), trimmed);
+  if (fs.existsSync(to)) return { ok: false, error: `"${trimmed}" already exists.` };
+  try {
+    fs.renameSync(from, to);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 });
 
 ipcMain.handle("delete-profile", (_e, name) => {
@@ -163,12 +242,19 @@ ipcMain.handle("switch-profile", async (_e, name) => {
   const src = path.join(profilesDir(), name, SESSION_FILENAME);
   if (!fs.existsSync(src)) return { ok: false, error: "Profile not found." };
 
+  sendProgress("closing");
   await killRiotProcesses();
-  await sleep(1500);
+  await sleep(600);
 
+  sendProgress("copying");
   fs.mkdirSync(riotDataDir(), { recursive: true });
-  fs.copyFileSync(src, liveSessionFile());
+  try {
+    await copyWithRetry(src, liveSessionFile());
+  } catch (err) {
+    return { ok: false, error: `Couldn't write the session file (${err.code || err.message}). Make sure Riot Client is fully closed and try again.` };
+  }
 
+  sendProgress("launching");
   const child = spawn(riotClientPath, [], { detached: true, stdio: "ignore" });
   child.unref();
   return { ok: true };
