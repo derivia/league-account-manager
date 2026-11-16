@@ -22,9 +22,22 @@ function riotDataDir() {
   return path.join(process.env.LOCALAPPDATA || "", "Riot Games", "Riot Client", "Data");
 }
 
+function riotConfigDir() {
+  return path.join(process.env.LOCALAPPDATA || "", "Riot Games", "Riot Client", "Config");
+}
+
 function liveSessionFile() {
   return path.join(riotDataDir(), SESSION_FILENAME);
 }
+
+// The YAML "stay signed in" file alone only holds UI state - the actual
+// refresh token lives in the Sessions folder, and RiotClientSettings.yaml
+// tracks which account it belongs to. All three have to travel together.
+const SESSION_PARTS = [
+  { key: "private-settings.yaml", live: () => liveSessionFile(), required: true },
+  { key: "sessions", live: () => path.join(riotDataDir(), "Sessions"), required: false },
+  { key: "client-settings.yaml", live: () => path.join(riotConfigDir(), "RiotClientSettings.yaml"), required: false },
+];
 
 function configFile() {
   return path.join(app.getPath("userData"), "config.json");
@@ -74,12 +87,14 @@ function fileHash(filePath) {
   }
 }
 
-// Copies src -> dest, retrying while the destination is locked by a Riot
-// process that hasn't released its file handle yet after being killed.
+// Copies src -> dest (file or directory), retrying while the destination
+// is locked by a Riot process that hasn't released its file handle yet
+// after being killed.
 async function copyWithRetry(src, dest, attempts = 8, delayMs = 400) {
   for (let i = 0; i < attempts; i++) {
     try {
-      fs.copyFileSync(src, dest);
+      fs.rmSync(dest, { recursive: true, force: true });
+      fs.cpSync(src, dest, { recursive: true });
       return;
     } catch (err) {
       if (i === attempts - 1) throw err;
@@ -174,19 +189,22 @@ ipcMain.handle("pick-riot-path", async () => {
   return { path: picked, warning };
 });
 
+function markerFile(profileName) {
+  return path.join(profilesDir(), profileName, SESSION_PARTS[0].key);
+}
+
 ipcMain.handle("list-profiles", () => {
   const liveHash = fileHash(liveSessionFile());
   try {
     return fs
       .readdirSync(profilesDir(), { withFileTypes: true })
-      .filter((e) => e.isDirectory() && fs.existsSync(path.join(profilesDir(), e.name, SESSION_FILENAME)))
+      .filter((e) => e.isDirectory() && fs.existsSync(markerFile(e.name)))
       .map((e) => {
-        const sessionPath = path.join(profilesDir(), e.name, SESSION_FILENAME);
-        const stat = fs.statSync(sessionPath);
+        const stat = fs.statSync(markerFile(e.name));
         return {
           name: e.name,
           savedAt: stat.mtimeMs,
-          active: liveHash !== null && liveHash === fileHash(sessionPath),
+          active: liveHash !== null && liveHash === fileHash(markerFile(e.name)),
         };
       })
       .sort((a, b) => a.name.localeCompare(b.name));
@@ -199,8 +217,8 @@ ipcMain.handle("profile-exists", (_e, name) => fs.existsSync(path.join(profilesD
 
 ipcMain.handle("save-profile", (_e, name) => {
   if (!name || !name.trim()) return { ok: false, error: "Name is required." };
-  const src = liveSessionFile();
-  if (!fs.existsSync(src)) {
+  const requiredPart = SESSION_PARTS.find((p) => p.required);
+  if (!fs.existsSync(requiredPart.live())) {
     return {
       ok: false,
       error: "No active Riot session found. Log in with \"Stay signed in\" checked first.",
@@ -208,7 +226,10 @@ ipcMain.handle("save-profile", (_e, name) => {
   }
   const dest = path.join(profilesDir(), name.trim());
   fs.mkdirSync(dest, { recursive: true });
-  fs.copyFileSync(src, path.join(dest, SESSION_FILENAME));
+  for (const part of SESSION_PARTS) {
+    const src = part.live();
+    if (fs.existsSync(src)) fs.cpSync(src, path.join(dest, part.key), { recursive: true });
+  }
   return { ok: true };
 });
 
@@ -239,8 +260,7 @@ ipcMain.handle("delete-profile", (_e, name) => {
 ipcMain.handle("switch-profile", async (_e, name) => {
   const riotClientPath = readConfig().riotClientPath;
   if (!riotClientPath) return { ok: false, error: "Riot Client location not set." };
-  const src = path.join(profilesDir(), name, SESSION_FILENAME);
-  if (!fs.existsSync(src)) return { ok: false, error: "Profile not found." };
+  if (!fs.existsSync(markerFile(name))) return { ok: false, error: "Profile not found." };
 
   sendProgress("closing");
   await killRiotProcesses();
@@ -248,10 +268,14 @@ ipcMain.handle("switch-profile", async (_e, name) => {
 
   sendProgress("copying");
   fs.mkdirSync(riotDataDir(), { recursive: true });
+  fs.mkdirSync(riotConfigDir(), { recursive: true });
   try {
-    await copyWithRetry(src, liveSessionFile());
+    for (const part of SESSION_PARTS) {
+      const src = path.join(profilesDir(), name, part.key);
+      if (fs.existsSync(src)) await copyWithRetry(src, part.live());
+    }
   } catch (err) {
-    return { ok: false, error: `Couldn't write the session file (${err.code || err.message}). Make sure Riot Client is fully closed and try again.` };
+    return { ok: false, error: `Couldn't write the session (${err.code || err.message}). Make sure Riot Client is fully closed and try again.` };
   }
 
   sendProgress("launching");
